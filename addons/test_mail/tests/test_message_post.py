@@ -8,6 +8,7 @@ from freezegun import freeze_time
 from itertools import product
 from markupsafe import escape, Markup
 from unittest.mock import patch
+from urllib.parse import parse_qsl, urlsplit
 
 from odoo import tools
 from odoo.addons.base.tests.test_ir_cron import CronMixinCase
@@ -403,6 +404,60 @@ class TestMailNotifyAPI(TestMessagePostCommon):
                 # check there is no access button
                 self.assertFalse(partner_info['has_button_access'])
                 self.assertFalse(emp_info['has_button_access'])
+
+    @users('employee')
+    def test_notify_recipients_internals_links_highlight(self):
+        """ Access link of discussion messages highlights the notified message
+        in the conversation. Messages using a specific layout (e.g. sending a
+        document) or not being user comments keep linking to the document. """
+        base_record = self.test_record.with_env(self.env)
+        pdata = self._generate_notify_recipients(self.partner_1 | self.partner_employee)
+
+        # message to highlight is propagated only for 'view' links
+        link = base_record._notify_get_action_link('view', highlight_message_id=42)
+        self.assertIn('highlight_message_id=42', link)
+        link = base_record._notify_get_action_link('controller', controller='/test/controller', highlight_message_id=42)
+        self.assertNotIn('highlight_message_id', link)
+
+        for message_values, exp_highlight in [
+            ({'message_type': 'comment'}, True),
+            ({'message_type': 'comment', 'email_layout_xmlid': 'mail.mail_notification_light'}, False),
+            ({'message_type': 'auto_comment'}, False),
+            ({'message_type': 'user_notification'}, False),
+        ]:
+            msg_vals = {
+                'body': 'Message body',
+                'model': base_record._name,
+                'res_id': base_record.id,
+                **message_values,
+            }
+            message = self.env['mail.message'].create(msg_vals)
+            for notify_msg_vals in (False, msg_vals):
+                with self.subTest(message_values=message_values, msg_vals=bool(notify_msg_vals)):
+                    classify_res = base_record._notify_get_recipients_classify(
+                        message, pdata, 'Test', msg_vals=notify_msg_vals,
+                    )
+                    partner_info = next(item for item in classify_res if item['recipients_ids'] == self.partner_1.ids)
+                    emp_info = next(item for item in classify_res if item['recipients_ids'] == self.partner_employee.ids)
+                    # partner without access: still no access button
+                    self.assertFalse(partner_info['has_button_access'])
+                    # employee: access button to the document, highlighting the message if discussion
+                    self.assertTrue(emp_info['has_button_access'])
+                    url_params = dict(parse_qsl(urlsplit(emp_info['button_access']['url']).query))
+                    self.assertEqual(url_params['model'], base_record._name)
+                    self.assertEqual(url_params['res_id'], str(base_record.id))
+                    if exp_highlight:
+                        self.assertEqual(url_params['highlight_message_id'], str(message.id))
+                    else:
+                        self.assertNotIn('highlight_message_id', url_params)
+
+        # void message (e.g. notifying from values only): no message to highlight
+        classify_res = base_record._notify_get_recipients_classify(
+            self.env['mail.message'], pdata, 'Test',
+            msg_vals={'message_type': 'comment', 'model': base_record._name, 'res_id': base_record.id},
+        )
+        emp_info = next(item for item in classify_res if item['recipients_ids'] == self.partner_employee.ids)
+        self.assertNotIn('highlight_message_id', emp_info['button_access']['url'])
 
 
 @tagged('mail_post', 'mail_notify')
