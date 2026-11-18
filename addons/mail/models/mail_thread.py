@@ -4139,6 +4139,7 @@ class MailThread(models.AbstractModel):
         # keep a local copy of msg_vals as it may be modified to include more
         # information about groups or links
         local_msg_vals = dict(msg_vals) if msg_vals else {}
+        local_msg_vals.update(self._notify_get_access_link_params(message, msg_vals=msg_vals))
         groups = self._notify_get_recipients_groups_fillup(
             self._notify_get_recipients_groups(
                 message, model_description, msg_vals=local_msg_vals
@@ -4183,6 +4184,35 @@ class MailThread(models.AbstractModel):
 
         return link
 
+    def _notify_get_access_link_params(self, message, msg_vals=False):
+        """ Additional parameters of the access link ('View Document' button)
+        of notification emails. Discussion messages (e.g. a comment mentioning
+        someone) are highlighted so that recipients land directly on them in
+        the conversation. Messages using a specific layout (e.g. sending a
+        quotation or an invoice) keep pointing to the document itself.
+
+        The message is only a hint: the link is still based on model and
+        res_id, so it keeps working even if the message is removed.
+
+        :param record message: <mail.message> record being notified. May be
+          void as 'msg_vals' superseeds it;
+        :param dict msg_vals: values dict used to create the message, allows to
+          skip message usage and spare some queries if given;
+
+        :return: parameters to give to '_notify_get_action_link' for 'view' links;
+        :rtype: dict
+        """
+        msg_vals = msg_vals or {}
+        message_type = msg_vals['message_type'] if 'message_type' in msg_vals else message.message_type
+        email_layout_xmlid = msg_vals['email_layout_xmlid'] if 'email_layout_xmlid' in msg_vals else message.email_layout_xmlid
+        if (
+            message and message_type == 'comment'
+            and not email_layout_xmlid
+            and self._is_thread_message(msg_vals=msg_vals)
+        ):
+            return {'highlight_message_id': message.id}
+        return {}
+
     # Notify tools and helpers
     # ------------------------------------------------------------
 
@@ -4209,6 +4239,9 @@ class MailThread(models.AbstractModel):
             if key in ('action', 'token', 'access_token', 'auth_signup_token',
                        'auth_login', 'pid', 'hash')
         })
+        # - view: highlight_message_id (message to highlight in the conversation)
+        if link_type == 'view' and kwargs.get('highlight_message_id'):
+            params['highlight_message_id'] = kwargs['highlight_message_id']
         if link_type == 'controller':
             params.pop('model')
         elif link_type not in ['view', 'assign', 'follow', 'unfollow']:
