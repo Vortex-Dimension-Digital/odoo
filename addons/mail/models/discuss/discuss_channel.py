@@ -934,6 +934,22 @@ class DiscussChannel(models.Model):
         for (index, (group_name, _group_func, group_data)) in enumerate(groups):
             if group_name != 'customer':
                 groups[index] = (group_name, lambda partner: False, group_data)
+        # Members having a user account can open the conversation (Discuss for
+        # internal users, channel page for portal users): give them a link to the
+        # notified discussion message, highlighted in the conversation. The
+        # message link goes through the login page when necessary.
+        if self and self._notify_get_access_link_params(message, msg_vals=msg_vals):
+            # sudo: discuss.channel.member - recipients are checked against all members
+            member_partner_ids = set(self.sudo().channel_member_ids.partner_id.ids)
+            groups.insert(0, (
+                'channel_member_user',
+                lambda pdata: pdata['uid'] and pdata['id'] in member_partner_ids,
+                {
+                    'active': True,
+                    'button_access': {'url': f'{self.get_base_url()}/mail/message/{message.id}'},
+                    'has_button_access': True,
+                },
+            ))
         return groups
 
     def _get_notify_valid_parameters(self):
