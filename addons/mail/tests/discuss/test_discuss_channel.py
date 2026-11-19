@@ -295,6 +295,67 @@ class TestChannelInternals(MailCommon, HttpCase):
                 message_type='comment', subtype_xmlid='mail.mt_comment')
         self.assertSentEmail(self.test_channel.env.user.partner_id, [self.test_partner])
 
+    @mute_logger('odoo.addons.mail.models.mail_mail', 'odoo.models.unlink', 'werkzeug')
+    def test_channel_recipients_mention_access_link(self):
+        """ Mentioned members having a user account receive a link to the
+        message, highlighted in the conversation (going through the login page
+        when necessary). Other recipients cannot open the conversation and
+        receive no link. """
+        portal_user = self._create_portal_user()
+        internal_user = mail_new_test_user(
+            self.env, login='employee_email', groups='base.group_user',
+            email='employee.email@example.com', name='Ernest Email',
+            notification_type='email',
+        )
+        partner_nouser = self.env['res.partner'].create({
+            'name': 'No User', 'email': 'no.user@example.com',
+        })
+        group = self.env['discuss.channel'].with_user(self.user_employee).create({
+            'name': 'Group', 'channel_type': 'group',
+        })
+        group._add_members(
+            partners=self.partner_employee | partner_nouser | portal_user.partner_id | internal_user.partner_id,
+        )
+
+        with self.mock_mail_gateway():
+            message = group.with_user(self.user_employee).message_post(
+                body='Hello', message_type='comment', subtype_xmlid='mail.mt_comment',
+                partner_ids=(partner_nouser | portal_user.partner_id | internal_user.partner_id).ids,
+            )
+
+        message_link = f'{group.get_base_url()}/mail/message/{message.id}'
+        for partner, has_link in (
+            (portal_user.partner_id, True),
+            (internal_user.partner_id, True),
+            (partner_nouser, False),
+        ):
+            with self.subTest(partner=partner.name):
+                mail = next(mail for mail in self._mails if partner.email in mail['email_to'][0])
+                if has_link:
+                    self.assertIn(f'href="{message_link}"', mail['body'])
+                else:
+                    self.assertNotIn('/mail/message/', mail['body'])
+                    self.assertNotIn('/mail/view', mail['body'])
+
+        # not logged: login first, then back to the message
+        self.authenticate(None, None)
+        res = self.url_open(message_link)
+        self.assertEqual(res.status_code, 200)
+        self.assertURLEqual(res.url, f'/web/login?redirect=/mail/message/{message.id}')
+        # portal member: channel page, message highlighted
+        self.authenticate(portal_user.login, portal_user.login)
+        res = self.url_open(message_link)
+        self.assertEqual(res.status_code, 200)
+        self.assertURLEqual(res.url, f'/discuss/channel/{group.id}?highlight_message_id={message.id}')
+        # internal member: Discuss, message highlighted
+        self.authenticate(internal_user.login, internal_user.login)
+        res = self.url_open(message_link)
+        self.assertEqual(res.status_code, 200)
+        self.assertURLEqual(
+            res.url,
+            f'/odoo/action-mail.action_discuss?active_id={group.id}&highlight_message_id={message.id}',
+        )
+
     @mute_logger('odoo.addons.mail.models.mail_mail', 'odoo.models.unlink')
     def test_channel_recipients_user_of_partner_with_archived_user(self):
         """The user picked for a recipient partner is one of its active users."""
